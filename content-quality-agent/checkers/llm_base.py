@@ -19,6 +19,23 @@ def load_prompt(name: str) -> str:
     return p.read_text(encoding="utf-8")
 
 
+def compose_prompt(base: str, sections: dict[str, str]) -> str:
+    """Append authoritative skill/reference sections to a prompt template."""
+    blocks = [base.strip()]
+    added = []
+    for title, content in sections.items():
+        if content and content.strip():
+            added.append(f"## {title}\n{content.strip()}")
+    if added:
+        blocks.append(
+            "AUTHORITATIVE SKILL RULES\n"
+            "Use these rules as the source of truth. If they conflict with the "
+            "task prompt above, follow these skill rules.\n\n"
+            + "\n\n".join(added)
+        )
+    return "\n\n---\n\n".join(blocks)
+
+
 def extract_json(content: str) -> dict:
     """Extract JSON from LLM response, tolerating markdown fences and extra text."""
     if not content:
@@ -108,18 +125,35 @@ class LLMClient:
     appropriate endpoint, model name, and API key.
     """
 
-    def __init__(self, endpoint: str, api_key: str, model: str, timeout: float = 60.0):
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        model: str,
+        timeout: float = 60.0,
+        max_tokens: int = 2000,
+        top_p: float = 0.95,
+        presence_penalty: float = 0.0,
+        instruction_role: str = "assistant",
+        force_json: bool = False,
+    ):
         self.endpoint = endpoint
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.max_tokens = max_tokens
+        self.top_p = top_p
+        self.presence_penalty = presence_penalty
+        self.instruction_role = instruction_role
+        self.force_json = force_json
 
     async def chat(self, system: str, user: str,
                    images_b64: Optional[list[str]] = None,
-                   force_json: bool = True,
-                   temperature: float = 0.1) -> str:
+                   force_json: Optional[bool] = None,
+                   temperature: float = 1.0,
+                   max_tokens: Optional[int] = None) -> str:
         """Send a chat completion request. Returns the assistant's text content."""
-        messages = [{"role": "system", "content": system}]
+        messages = [{"role": self.instruction_role, "content": system}]
 
         if images_b64:
             # Build multimodal user message (OpenAI-style)
@@ -141,9 +175,12 @@ class LLMClient:
         payload = {
             "model": self.model,
             "messages": messages,
+            "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
             "temperature": temperature,
+            "top_p": self.top_p,
+            "presence_penalty": self.presence_penalty,
         }
-        if force_json:
+        if self.force_json if force_json is None else force_json:
             payload["response_format"] = {"type": "json_object"}
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -155,7 +192,13 @@ class LLMClient:
                 },
                 json=payload,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                body = e.response.text[:500]
+                raise RuntimeError(
+                    f"LLM API returned HTTP {e.response.status_code}: {body}"
+                ) from e
             data = resp.json()
 
         # OpenAI-compatible response shape
