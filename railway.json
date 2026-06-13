@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "bash start.sh",
+    "startCommand": "cd content-quality-checker && streamlit run app.py --server.port 8501 --server.address 0.0.0.0 & python -m uvicorn main:app --host 0.0.0.0 --port 8000",
     "restartPolicyType": "ON_FAILURE"
   }
 }
