@@ -1,167 +1,377 @@
 # Content Quality Checker Agent
 
-A FastAPI agent that proofreads and scores social media posts using the
-`content-quality-checker` Claude skill plus two LLMs (Minimax 2.5 + Gemma 4).
+AI Agent dùng FastAPI để kiểm tra chất lượng bài đăng/caption mạng xã hội. Agent kết hợp:
 
-## Architecture
+- deterministic rules bằng Python regex, chạy nhanh và không tốn chi phí
+- skill `content-quality-checker` làm source of truth cho rule/spec
+- AI Platform text model để kiểm tra lỗi ngữ nghĩa, lỗi dấu tiếng Việt, typo theo ngữ cảnh
+- AI Platform vision/multimodal model để OCR ảnh và so sánh ảnh với caption
 
-```
-my-workspace/
-├── content-quality-checker/      ← The skill (rules + tests)
+## Cấu trúc thư mục
+
+```text
+13.06_clawathon/
+├── content-quality-checker/        # Skill: SKILL.md + references + test cases
 │   ├── SKILL.md
 │   ├── references/
 │   └── tests/
-└── content-quality-agent/        ← This agent
-    ├── agent.py                  ← FastAPI entrypoint
-    ├── skill_loader.py
-    ├── scorer.py
+└── content-quality-agent/          # FastAPI agent
+    ├── agent.py                    # API entrypoint
+    ├── skill_loader.py             # Load skill/references
+    ├── scorer.py                   # Tính score, grade, corrected_text
     ├── checkers/
-    │   ├── deterministic.py      ← Pure regex (free, fast)
-    │   ├── gemma_checker.py      ← Gemma 4 — typos, diacritics
-    │   ├── minimax_checker.py    ← Minimax 2.5 — semantic + images
-    │   └── llm_base.py
-    ├── prompts/
-    │   ├── vietnamese_tone.txt
-    │   ├── homophone_context.txt
-    │   ├── basic_typo.txt
-    │   └── image_check.txt
+    │   ├── deterministic.py        # Regex checks
+    │   ├── gemma_checker.py        # Optional typo pass
+    │   ├── minimax_checker.py      # Text + image checks qua AI Platform
+    │   └── llm_base.py             # OpenAI-compatible client
+    ├── prompts/                    # Prompt template cho từng tác vụ AI
+    ├── tests/
     ├── Dockerfile
     ├── docker-compose.yml
     ├── requirements.txt
     └── .env.example
 ```
 
-The agent reads the skill at startup and injects relevant rule sections into
-LLM prompts. Deterministic rules run as regex; semantic rules go to LLMs.
+## Skill và prompt được dùng như thế nào
 
-## Pipeline
+Khi app khởi động, agent load toàn bộ `content-quality-checker/SKILL.md` và các file trong `content-quality-checker/references/`.
 
-```
-POST /check
-  → 1. Deterministic checks (SP-01..09, PU-*, CA-04, CA-05)
-  → 2. Gemma 4 — basic typos, diacritics, brand spelling
-  → 3. Minimax 2.5 — Vietnamese tones, homophones, missing words
-  → 4. Minimax 2.5 (multimodal) — OCR image, cross-check vs caption
-  → 5. Deduplicate, sort, score
-  → JSON response
+Khi gọi AI model, agent ghép:
+
+```text
+prompts/*.txt + authoritative rules từ content-quality-checker/references/*.md
 ```
 
-Phases 2/3/4 run **in parallel** (`asyncio.gather`).
+Mapping hiện tại:
 
-## Run locally
+- `basic_typo.txt` + `typo-rules.md` + `brand-style-rules.md` + `output-format.md`
+- `vietnamese_tone.txt` + `vietnamese-tone-rules.md` + `output-format.md`
+- `homophone_context.txt` + `typo-rules.md` + `brand-style-rules.md` + `output-format.md`
+- `image_check.txt` + `SKILL.md` + `output-format.md`
+
+Nói ngắn gọn: `prompts/` là template nhiệm vụ cụ thể, còn `content-quality-checker/` là rule/spec gốc được inject vào prompt runtime.
+
+## Luồng xử lý
+
+```text
+POST /check hoặc POST /check/image
+→ validate input
+→ deterministic checks: spacing, punctuation, capitalization, forbidden words
+→ nếu enable_llm=true:
+   → Gemma optional: typo cơ bản
+   → AI Platform text model: dấu tiếng Việt, homophone, semantic/context
+   → AI Platform vision model: OCR ảnh và so sánh với caption
+→ deduplicate issues
+→ tính score/grade
+→ build corrected_text
+→ trả JSON response
+```
+
+## Yêu cầu trước khi chạy
+
+- Docker Desktop nếu chạy bằng Docker Compose
+- Python 3.11+ nếu chạy trực tiếp local
+- API key của VNGCloud AI Platform nếu muốn bật LLM
+- Một model text, ví dụ `minimax/minimax-m2.5`
+- Một model vision/multimodal nếu muốn dùng `/check/image`
+
+Lưu ý: `minimax/minimax-m2.5` là text-only, không dùng được cho ảnh. Với `/check/image`, cần set `AI_PLATFORM_VISION_MODEL` thành model hỗ trợ image input trên AI Platform.
+
+## Cấu hình `.env`
+
+Tạo file `.env` từ template:
 
 ```bash
-# 1. From the parent directory (containing both skill and agent folders)
 cd content-quality-agent
-
-# 2. Copy env template and fill in API keys
 cp .env.example .env
-# Edit .env with your MINIMAX_API_KEY and GEMMA_API_KEY
-
-# 3. Install deps
-pip install -r requirements.txt
-
-# 4. Run
-python agent.py
-# or: uvicorn agent:app --reload --port 8000
 ```
 
-## Run with Docker
+Ví dụ cấu hình tối thiểu để chạy deterministic-only:
 
-```bash
-# From the parent directory containing both skill and agent
-cd <parent-dir>
-
-# Build (uses content-quality-agent/Dockerfile, context = parent)
-docker build -f content-quality-agent/Dockerfile -t content-quality-agent:latest .
-
-# Run
-docker run -p 8000:8000 \
-  -e MINIMAX_API_KEY=sk-xxx \
-  -e GEMMA_API_KEY=sk-yyy \
-  content-quality-agent:latest
+```env
+ENABLE_LLM=false
+PORT=8000
 ```
 
-Or with compose:
+Ví dụ cấu hình để gọi AI text model:
+
+```env
+ENABLE_LLM=true
+AI_PLATFORM_API_KEY=your_key_here
+AI_PLATFORM_ENDPOINT=https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1/chat/completions
+AI_PLATFORM_MODEL=minimax/minimax-m2.5
+```
+
+Ví dụ cấu hình thêm image/caption consistency:
+
+```env
+AI_PLATFORM_VISION_MODEL=your_multimodal_model_name
+```
+
+## Chạy bằng Docker Compose
+
+Chạy từ thư mục `content-quality-agent`:
 
 ```bash
 cd content-quality-agent
 docker compose up --build
 ```
 
-## API
-
-### `POST /check`
+Chạy nền:
 
 ```bash
-curl -X POST http://localhost:8000/check \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Ngày 10/06 vừa qua, GreenNodeClaw-a-thon đã mở màn...",
-    "project": {
-      "brand_name": "GreenNode",
-      "brand_exclusions": ["GreenNode", "AgentBase", "VNGCampus"],
-      "tone": "casual"
-    }
-  }'
+docker compose up -d --build
 ```
 
-### Response
+Dừng container:
+
+```bash
+docker compose down
+```
+
+Docker Compose dùng build context là thư mục cha (`..`) để image include cả:
+
+- `content-quality-agent/`
+- `content-quality-checker/`
+
+Vì vậy nếu sửa skill/rules thì cần rebuild image.
+
+## Chạy bằng Docker thủ công
+
+Chạy từ root repo `13.06_clawathon`:
+
+```bash
+docker build -f content-quality-agent/Dockerfile -t content-quality-agent:latest .
+```
+
+Deterministic-only:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e ENABLE_LLM=false \
+  --name content-quality-agent \
+  content-quality-agent:latest
+```
+
+Có AI text model:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e ENABLE_LLM=true \
+  -e AI_PLATFORM_API_KEY=your_key_here \
+  -e AI_PLATFORM_MODEL=minimax/minimax-m2.5 \
+  --name content-quality-agent \
+  content-quality-agent:latest
+```
+
+## Chạy trực tiếp bằng Python
+
+```bash
+cd content-quality-agent
+pip install -r requirements.txt
+python agent.py
+```
+
+Hoặc:
+
+```bash
+uvicorn agent:app --reload --port 8000
+```
+
+## API endpoints
+
+### `GET /health`
+
+Kiểm tra app và skill đã load chưa:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Response ví dụ:
 
 ```json
 {
-  "score": 72,
-  "grade": "C",
-  "total_issues": 5,
-  "issues_by_severity": { "critical": 2, "major": 2, "minor": 1, "suggestion": 0 },
-  "categories": { ... },
-  "issues": [
-    {
-      "rule_id": "SP-08",
-      "severity": "major",
-      "category": "spacing",
-      "position": "char 20",
-      "found": "GreenNodeClaw",
-      "suggestion": "GreenNode Claw",
-      "message": "Possible missing space: 'GreenNode' + 'Claw' merged"
-    }
-  ],
-  "original_text": "...",
-  "corrected_text": "..."
+  "status": "ok",
+  "skill_loaded": true,
+  "llm_ready": true
 }
 ```
 
-### Fast mode (no LLM)
+### `GET /health/model`
 
-Set `enable_llm: false` in the request to skip LLM calls — runs only the
-deterministic checks. Returns in ~50ms instead of ~5-10s.
-
-## Environment variables
-
-| Var | Required | Default |
-|-----|----------|---------|
-| `MINIMAX_API_KEY` | for semantic checks | — |
-| `MINIMAX_ENDPOINT` | no | `https://api.minimax.chat/v1/chat/completions` |
-| `MINIMAX_MODEL` | no | `minimax-2.5` |
-| `GEMMA_API_KEY` | for fast typo pass | — |
-| `GEMMA_ENDPOINT` | no | (set in `.env.example`) |
-| `GEMMA_MODEL` | no | `gemma-4` |
-| `SKILL_PATH` | no | `../content-quality-checker` |
-| `PORT` | no | `8000` |
-| `ENABLE_LLM` | no | `true` |
-| `LOG_LEVEL` | no | `INFO` |
-
-## Testing
+Gọi thử AI text model bằng prompt rất nhỏ:
 
 ```bash
-# Health check
-curl http://localhost:8000/health
+curl http://localhost:8000/health/model
+```
 
-# Skill info
+Nếu key/model đúng, response có `status=ok`, `model`, `endpoint`, `latency_ms`.
+
+### `GET /skill/info`
+
+Xem skill path và danh sách reference files đã load:
+
+```bash
 curl http://localhost:8000/skill/info
+```
 
-# Deterministic-only check (no LLM keys needed)
+### `POST /check`
+
+Kiểm tra một đoạn text/caption.
+
+Git Bash:
+
+```bash
 curl -X POST http://localhost:8000/check \
   -H "Content-Type: application/json" \
-  -d '{ "text": "Test  text!! ", "enable_llm": false }'
+  -d '{"text":"GreenNodeClaw-a-thon da mo man  bang buoi dao tao!!","project":{"brand_name":"GreenNode","brand_exclusions":["GreenNode"]},"enable_llm":false}'
+```
+
+PowerShell:
+
+```powershell
+$body = @{
+  text = "GreenNodeClaw-a-thon đã mở màn  bằng buổi đào tạo!!"
+  project = @{
+    brand_name = "GreenNode"
+    brand_exclusions = @("GreenNode")
+  }
+  enable_llm = $false
+} | ConvertTo-Json -Depth 5
+
+Invoke-RestMethod -Uri http://localhost:8000/check -Method Post -ContentType "application/json; charset=utf-8" -Body $body
+```
+
+### `POST /check/image`
+
+Upload ảnh và caption để kiểm tra sự đồng nhất giữa nội dung ảnh và caption.
+
+```bash
+curl -X POST http://localhost:8000/check/image \
+  -F 'caption=Sale 50% đến ngày 30/6 cho GreenNode Claw-a-thon' \
+  -F 'images=@/path/to/image.png' \
+  -F 'project_json={"brand_name":"GreenNode","brand_exclusions":["GreenNode","VNGCampus","AIAgent"]}' \
+  -F 'enable_llm=true'
+```
+
+Endpoint này yêu cầu:
+
+- `ENABLE_LLM=true`
+- `AI_PLATFORM_API_KEY` có giá trị
+- `AI_PLATFORM_VISION_MODEL` là model multimodal hỗ trợ image input
+
+Nếu image check không chạy được, endpoint trả HTTP `503` để tránh hiểu nhầm là đã check ảnh thành công.
+
+## Response chính
+
+Response `/check` và `/check/image` có dạng:
+
+```json
+{
+  "score": 88,
+  "grade": "B",
+  "total_issues": 3,
+  "issues_by_severity": {
+    "critical": 0,
+    "major": 2,
+    "minor": 1,
+    "suggestion": 0
+  },
+  "categories": {},
+  "issues": [],
+  "original_text": "...",
+  "corrected_text": "...",
+  "metadata": {
+    "deterministic_checks": 3,
+    "llm_used": false,
+    "images_checked": 0,
+    "image_checks": []
+  }
+}
+```
+
+Với `/check/image`, `metadata.image_checks` sẽ có OCR/check report:
+
+```json
+{
+  "image_index": 0,
+  "status": "ok",
+  "model": "your_multimodal_model_name",
+  "image_text_extracted": "...",
+  "conflicts_count": 0,
+  "raw": {}
+}
+```
+
+## Test
+
+Unit test deterministic:
+
+```bash
+PYTHONUTF8=1 python content-quality-agent/tests/test_deterministic.py
+```
+
+Integration test API:
+
+```bash
+PYTHONUTF8=1 python content-quality-agent/tests/test_api.py http://localhost:8000
+```
+
+Manual text test:
+
+```bash
+PYTHONUTF8=1 python content-quality-agent/tests/check_content_manual.py http://localhost:8000 --llm
+```
+
+Manual image test:
+
+```bash
+PYTHONUTF8=1 python content-quality-agent/tests/check_image_manual.py http://localhost:8000
+```
+
+File output của manual tests:
+
+- `content-quality-agent/tests/last_check_response.json`
+- `content-quality-agent/tests/last_image_check_response.json`
+
+## Troubleshooting
+
+### `/health` có `llm_ready=false`
+
+Kiểm tra `.env`:
+
+```env
+ENABLE_LLM=true
+AI_PLATFORM_API_KEY=your_key_here
+```
+
+Sau đó rebuild container.
+
+### `/check/image` báo model không multimodal
+
+Lỗi ví dụ:
+
+```text
+minimax-m2.5 is not a multimodal model
+```
+
+Cách xử lý: giữ `AI_PLATFORM_MODEL=minimax/minimax-m2.5` cho text, và set thêm:
+
+```env
+AI_PLATFORM_VISION_MODEL=your_multimodal_model_name
+```
+
+### Git Bash gửi tiếng Việt bị lỗi parse body
+
+Dùng JSON file hoặc PowerShell. Với Git Bash:
+
+```bash
+cat > payload.json <<'EOF'
+{"text":"GreenNodeClaw-a-thon đã mở màn  bằng buổi đào tạo!!","enable_llm":false}
+EOF
+
+curl -X POST http://localhost:8000/check \
+  -H "Content-Type: application/json; charset=utf-8" \
+  --data-binary @payload.json
 ```

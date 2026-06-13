@@ -1,136 +1,292 @@
-# Deployment Guide
+# Hướng Dẫn Build, Chạy Local Và Deploy
 
-## Local Testing First
+Tài liệu này hướng dẫn cách chạy agent ở local bằng Docker/Python và chuẩn bị deploy lên GreenNode AgentBase.
+
+## 1. Chuẩn bị
+
+Repo cần giữ cấu trúc 2 thư mục song song:
+
+```text
+13.06_clawathon/
+├── content-quality-checker/   # Skill/rules
+└── content-quality-agent/     # FastAPI agent
+```
+
+Dockerfile của agent copy cả 2 thư mục vào image, nên build context phải là root repo `13.06_clawathon`, không phải chỉ folder `content-quality-agent`.
+
+## 2. Cấu hình `.env`
+
+Tạo `.env`:
 
 ```bash
 cd content-quality-agent
 cp .env.example .env
-# Edit .env with at least one API key (or set ENABLE_LLM=false for code-only)
-
-pip install -r requirements.txt
-python tests/test_deterministic.py   # 21 unit tests
-python agent.py                      # starts on :8000
 ```
 
-In another terminal:
-```bash
-python tests/test_api.py             # 5 integration tests
+Chạy không gọi AI:
+
+```env
+ENABLE_LLM=false
+PORT=8000
 ```
 
-## Docker Build
+Chạy có AI text model:
 
-The Dockerfile expects the build context to be the **parent directory**
-containing both `content-quality-checker/` (the skill) and
-`content-quality-agent/` (this code).
-
-```bash
-# From the parent directory:
-docker build -f content-quality-agent/Dockerfile -t content-quality-agent:latest .
+```env
+ENABLE_LLM=true
+AI_PLATFORM_API_KEY=your_key_here
+AI_PLATFORM_ENDPOINT=https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1/chat/completions
+AI_PLATFORM_MODEL=minimax/minimax-m2.5
 ```
 
-Image size should be around 200 MB (Python slim + FastAPI deps).
+Chạy thêm endpoint ảnh `/check/image`:
 
-## Docker Run
-
-```bash
-docker run -d -p 8000:8000 \
-  -e MINIMAX_API_KEY=sk-your-key \
-  -e GEMMA_API_KEY=sk-your-key \
-  --name cqa \
-  content-quality-agent:latest
-
-# Check logs
-docker logs -f cqa
-
-# Smoke test
-curl http://localhost:8000/health
+```env
+AI_PLATFORM_VISION_MODEL=your_multimodal_model_name
 ```
 
-## Docker Compose
+Lưu ý: `minimax/minimax-m2.5` là text-only. Không dùng model này cho ảnh.
+
+## 3. Chạy bằng Docker Compose
+
+Từ folder `content-quality-agent`:
 
 ```bash
-cd content-quality-agent
-cp .env.example .env  # edit with your keys
+docker compose up --build
+```
+
+Chạy nền:
+
+```bash
 docker compose up -d --build
 ```
 
-## Deploy to AgentBase (8-step flow from slide)
-
-1. **Login Portal** — Get `Client ID`, `Client Secret`, `API Key` from AgentBase
-2. **Create GitHub Repo** — `gh repo create content-quality-agent --public`
-3. **Build Agent** — copy this code into the repo
-4. **Import Skill** — clone the skill repo next to it:
-   ```
-   my-workspace/
-   ├── content-quality-checker/    ← skill
-   └── content-quality-agent/      ← this code
-   ```
-5. **Run Prompt Deploy** — use AgentBase's deploy skill
-6. **Fill credentials** — in the AgentBase form:
-   - `MINIMAX_API_KEY` = your Minimax key
-   - `GEMMA_API_KEY` = your Gemma key
-   - Runtime: Python 3.11, 1 vCPU, 2GB RAM is enough
-7. **Docker Build & Push** — wait ~2-3 min for `ACTIVE` status
-8. **Push GitHub** — `git push origin main`, copy URL to submit
-
-## Verify deployment
+Xem logs:
 
 ```bash
-AGENT_URL=https://your-agent.agentbase.example
-curl $AGENT_URL/health
-curl -X POST $AGENT_URL/check \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "text": "GreenNodeClaw-a-thon đã mở màn!!",
-    "project": {"brand_exclusions": ["GreenNode"]}
-  }'
+docker compose logs -f
 ```
 
-Expected response: `score < 100`, with `SP-08` and `PU-02` issues detected.
+Dừng:
 
-## Cost & Latency Tuning
+```bash
+docker compose down
+```
 
-| Mode | Latency | Cost per check |
-|------|---------|---------------|
-| `enable_llm=false` | ~50 ms | $0 |
-| Gemma only | ~2 s | very low |
-| Gemma + Minimax (no image) | ~5–8 s | low |
-| + image OCR (Minimax multimodal) | ~10–15 s | medium |
+## 4. Build Docker thủ công
 
-**Tips:**
-- Default web traffic: `enable_llm=true`
-- Batch / cron jobs reviewing thousands of posts: prefer `enable_llm=false`,
-  fall back to LLM only when score < 85 (configurable in your client)
-- Cache by `hash(text + project)` — same input always produces same result
+Từ root repo `13.06_clawathon`:
 
-## Monitoring
-
-Endpoints exposed for ops:
-- `GET /health` — liveness check (Docker HEALTHCHECK uses this)
-- `GET /skill/info` — confirms which skill version is loaded
-- `GET /` — agent metadata + capability flags
-
-Suggested alerts:
-- `/health` returns 503 → skill not loaded
-- `llm_ready: false` in `/` after deployment → API keys missing
-- p95 `/check` latency > 20s → upstream LLM degradation
-
-## Updating the skill without rebuilding
-
-The skill is baked into the image at build time. To update rules without a
-full rebuild:
-
-**Option A** (recommended): rebuild — the skill is the source of truth
 ```bash
 docker build -f content-quality-agent/Dockerfile -t content-quality-agent:latest .
-docker compose up -d
 ```
 
-**Option B**: mount the skill as a volume (dev only)
-```yaml
-# docker-compose.yml override
-services:
-  agent:
-    volumes:
-      - ../content-quality-checker:/app/content-quality-checker:ro
+Chạy deterministic-only:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e ENABLE_LLM=false \
+  --name content-quality-agent \
+  content-quality-agent:latest
 ```
+
+Chạy có AI text model:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e ENABLE_LLM=true \
+  -e AI_PLATFORM_API_KEY=your_key_here \
+  -e AI_PLATFORM_MODEL=minimax/minimax-m2.5 \
+  --name content-quality-agent \
+  content-quality-agent:latest
+```
+
+Chạy có thêm vision model:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e ENABLE_LLM=true \
+  -e AI_PLATFORM_API_KEY=your_key_here \
+  -e AI_PLATFORM_MODEL=minimax/minimax-m2.5 \
+  -e AI_PLATFORM_VISION_MODEL=your_multimodal_model_name \
+  --name content-quality-agent \
+  content-quality-agent:latest
+```
+
+## 5. Smoke test local
+
+Health:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Model health:
+
+```bash
+curl http://localhost:8000/health/model
+```
+
+Skill info:
+
+```bash
+curl http://localhost:8000/skill/info
+```
+
+Text check không gọi AI:
+
+```bash
+curl -X POST http://localhost:8000/check \
+  -H "Content-Type: application/json" \
+  -d '{"text":"GreenNodeClaw-a-thon da mo man  bang buoi dao tao!!","project":{"brand_name":"GreenNode","brand_exclusions":["GreenNode"]},"enable_llm":false}'
+```
+
+Image + caption check:
+
+```bash
+curl -X POST http://localhost:8000/check/image \
+  -F 'caption=Sale 50% đến ngày 30/6 cho GreenNode Claw-a-thon' \
+  -F 'images=@/path/to/image.png' \
+  -F 'project_json={"brand_name":"GreenNode","brand_exclusions":["GreenNode","VNGCampus","AIAgent"]}' \
+  -F 'enable_llm=true'
+```
+
+## 6. Chạy test scripts
+
+Deterministic tests:
+
+```bash
+PYTHONUTF8=1 python content-quality-agent/tests/test_deterministic.py
+```
+
+API integration tests:
+
+```bash
+PYTHONUTF8=1 python content-quality-agent/tests/test_api.py http://localhost:8000
+```
+
+Manual text check:
+
+```bash
+PYTHONUTF8=1 python content-quality-agent/tests/check_content_manual.py http://localhost:8000 --llm
+```
+
+Manual image check:
+
+```bash
+PYTHONUTF8=1 python content-quality-agent/tests/check_image_manual.py http://localhost:8000
+```
+
+## 7. Deploy lên GreenNode AgentBase
+
+Flow đề xuất:
+
+1. Đăng nhập AgentBase portal.
+2. Lấy `Client ID`, `Client Secret`, `API Key` nếu portal yêu cầu.
+3. Tạo GitHub repo chứa project.
+4. Đảm bảo repo có cả:
+   - `content-quality-agent/`
+   - `content-quality-checker/`
+5. Build agent bằng Dockerfile:
+   - Dockerfile path: `content-quality-agent/Dockerfile`
+   - build context: root repo
+6. Cấu hình environment variables:
+   - `ENABLE_LLM=true`
+   - `AI_PLATFORM_API_KEY`
+   - `AI_PLATFORM_ENDPOINT`
+   - `AI_PLATFORM_MODEL`
+   - `AI_PLATFORM_VISION_MODEL` nếu dùng `/check/image`
+   - optional: `GEMMA_API_KEY`, `GEMMA_ENDPOINT`, `GEMMA_MODEL`
+7. Deploy và chờ service active.
+8. Verify bằng `/health`, `/health/model`, `/skill/info`, `/check`.
+
+## 8. Verify deployment
+
+```bash
+AGENT_URL=https://your-agent-url
+
+curl $AGENT_URL/health
+curl $AGENT_URL/health/model
+curl $AGENT_URL/skill/info
+```
+
+Text check:
+
+```bash
+curl -X POST $AGENT_URL/check \
+  -H "Content-Type: application/json" \
+  -d '{"text":"GreenNodeClaw-a-thon da mo man  bang buoi dao tao!!","project":{"brand_name":"GreenNode","brand_exclusions":["GreenNode"]},"enable_llm":false}'
+```
+
+Kỳ vọng:
+
+- `score < 100`
+- có issue `SP-08`
+- có issue `PU-02` nếu text có `!!`
+
+## 9. Monitoring
+
+Endpoints nên monitor:
+
+- `GET /health`: liveness, skill load status
+- `GET /health/model`: AI Platform text model status
+- `GET /skill/info`: xác nhận skill path và references đã load
+- `POST /check`: text check
+- `POST /check/image`: image/caption consistency check
+
+Alert gợi ý:
+
+- `/health` không trả `status=ok`
+- `/health/model` trả HTTP 503
+- `/check` p95 latency > 20s
+- `/check/image` trả HTTP 503 do vision model chưa cấu hình hoặc provider lỗi
+
+## 10. Cập nhật skill/rules
+
+Skill được bake vào Docker image tại build time:
+
+```dockerfile
+COPY content-quality-checker/ /app/content-quality-checker/
+```
+
+Nếu sửa file trong `content-quality-checker/`, cần rebuild image:
+
+```bash
+cd content-quality-agent
+docker compose up -d --build
+```
+
+Trong dev có thể mount volume skill để khỏi rebuild, nhưng khi deploy AgentBase nên bake skill vào image để version rõ ràng.
+
+## 11. Troubleshooting nhanh
+
+### Docker build báo không tìm thấy `content-quality-checker`
+
+Bạn đang build sai context. Chạy từ root repo:
+
+```bash
+docker build -f content-quality-agent/Dockerfile -t content-quality-agent:latest .
+```
+
+### `/health` có `llm_ready=false`
+
+Kiểm tra:
+
+```env
+ENABLE_LLM=true
+AI_PLATFORM_API_KEY=your_key_here
+```
+
+Sau đó rebuild/restart container.
+
+### `/check/image` báo image check disabled
+
+Thiếu vision model:
+
+```env
+AI_PLATFORM_VISION_MODEL=your_multimodal_model_name
+```
+
+### `/check/image` báo model không multimodal
+
+Đổi `AI_PLATFORM_VISION_MODEL` sang model có support image input. Không dùng `minimax/minimax-m2.5` cho ảnh.

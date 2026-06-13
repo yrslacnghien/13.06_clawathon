@@ -1,0 +1,37 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs and local outputs
+*.log
+content-quality-agent/tests/last_check_response.json
+content-quality-agent/tests/last_image_check_response.json
+test.json
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
