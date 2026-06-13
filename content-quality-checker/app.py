@@ -20,7 +20,7 @@ if st.button("🚀 BẮT ĐẦU KIỂM DUYỆT QUALITY"):
                 if uploaded_file is not None:
                     files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
                 
-                # Gọi thẳng vào cổng 8500 nội bộ đang chạy ngầm
+                # Gọi thẳng vào cổng 8500 nội bộ đang chạy ngầm trên cùng server
                 backend_url = "http://localhost:8500/check" 
                 data = {"caption": caption}
                 
